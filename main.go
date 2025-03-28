@@ -90,7 +90,7 @@ func messageCommand(s *discordgo.Session, m *discordgo.MessageCreate) {
 
 	parts := strings.Fields(m.Content)
 	if len(parts) < 2 {
-		s.ChannelMessageSend(m.ChannelID, "Usage: !autodelete [enable|disable] [minutes]")
+		s.ChannelMessageSend(m.ChannelID, "Usage: !autodelete [enable|disable|set] [minutes]")
 		return
 	}
 
@@ -114,8 +114,21 @@ func messageCommand(s *discordgo.Session, m *discordgo.MessageCreate) {
 	case "disable":
 		settings.Enabled = false
 		s.ChannelMessageSend(m.ChannelID, "Auto-delete disabled for this channel")
+	case "set":
+		if len(parts) < 3 {
+			s.ChannelMessageSend(m.ChannelID, "Usage: !autodelete set [minutes]")
+			return
+		}
+		if minutes, err := strconv.Atoi(parts[2]); err == nil && minutes > 0 {
+			settings.DeleteAfterMinutes = minutes
+			msg := fmt.Sprintf("Auto-delete time updated to %d minutes", settings.DeleteAfterMinutes)
+			s.ChannelMessageSend(m.ChannelID, msg)
+		} else {
+			s.ChannelMessageSend(m.ChannelID, "Invalid minutes value. Please provide a positive number.")
+			return
+		}
 	default:
-		s.ChannelMessageSend(m.ChannelID, "Usage: !autodelete [enable|disable] [minutes]")
+		s.ChannelMessageSend(m.ChannelID, "Usage: !autodelete [enable|disable|set] [minutes]")
 		return
 	}
 
