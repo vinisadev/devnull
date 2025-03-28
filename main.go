@@ -18,15 +18,6 @@ const (
 	deleteAfter = 2 * time.Minute
 )
 
-type Message struct {
-	gorm.Model
-	MessageID  string
-	ChannelID  string
-	Content    string
-	AuthorID   string
-	DeleteTime time.Time
-}
-
 type ChannelSettings struct {
 	gorm.Model
 	ChannelID string `gorm:"uniqueIndex"`
@@ -52,7 +43,7 @@ func initDB() {
 	}
 
 	// Auto migrate models
-	err = db.AutoMigrate(&Message{}, &ChannelSettings{})
+	err = db.AutoMigrate(&ChannelSettings{})
 	if err != nil {
 		log.Fatalf("Failed to migrate database: %v", err)
 	}
@@ -168,19 +159,6 @@ func messageCreate(s *discordgo.Session, m *discordgo.MessageCreate) {
 
 	if !settings.Enabled {
 		return
-	}
-
-	// Store message in database
-	msg := Message{
-		MessageID:  m.ID,
-		ChannelID:  m.ChannelID,
-		Content:    m.Content,
-		AuthorID:   m.Author.ID,
-		DeleteTime: time.Now().Add(deleteAfter),
-	}
-
-	if err := db.Create(&msg).Error; err != nil {
-		log.Printf("Error saving message to database: %v", err)
 	}
 
 	// Schedule message deletion
