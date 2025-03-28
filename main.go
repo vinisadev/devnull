@@ -5,6 +5,7 @@ import (
 	"log"
 	"os"
 	"os/signal"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -14,15 +15,12 @@ import (
 	"gorm.io/gorm"
 )
 
-const (
-	deleteAfter = 2 * time.Minute
-)
-
 type ChannelSettings struct {
 	gorm.Model
-	ChannelID string `gorm:"uniqueIndex"`
-	ServerID  string
-	Enabled   bool
+	ChannelID          string `gorm:"uniqueIndex"`
+	ServerID           string
+	Enabled            bool
+	DeleteAfterMinutes int `gorm:"default:2"`
 }
 
 var db *gorm.DB
@@ -42,43 +40,34 @@ func initDB() {
 		log.Fatalf("Failed to connect to database: %v", err)
 	}
 
-	// Auto migrate models
 	err = db.AutoMigrate(&ChannelSettings{})
 	if err != nil {
 		log.Fatalf("Failed to migrate database: %v", err)
 	}
-
-	// Create default settings for existing channels (disabled by default)
 }
 
 func main() {
-	// Initialize database
 	initDB()
 
-	// Get bot token from environment variable
 	token := os.Getenv("DISCORD_BOT_TOKEN")
 	if token == "" {
 		log.Fatal("DISCORD_BOT_TOKEN environment variable not set")
 	}
 
-	// Create Discord session
 	dg, err := discordgo.New("Bot " + token)
 	if err != nil {
 		log.Fatalf("Error creating Discord session: %v", err)
 	}
 
-	// Register handlers
 	dg.AddHandler(messageCreate)
 	dg.AddHandler(messageCommand)
 
-	// Open connection
 	err = dg.Open()
 	if err != nil {
 		log.Fatalf("Error opening connection: %v", err)
 	}
 	defer dg.Close()
 
-	// Wait for interrupt signal
 	fmt.Println("Bot is now running. Press CTRL-C to exit.")
 	sc := make(chan os.Signal, 1)
 	signal.Notify(sc, syscall.SIGINT, syscall.SIGTERM, os.Interrupt)
@@ -86,17 +75,14 @@ func main() {
 }
 
 func messageCommand(s *discordgo.Session, m *discordgo.MessageCreate) {
-	// Ignore bot's own messages
 	if m.Author.ID == s.State.User.ID {
 		return
 	}
 
-	// Check for !autodelete command
 	if !strings.HasPrefix(m.Content, "!autodelete") {
 		return
 	}
 
-	// Only allow server admins to use this command
 	member, err := s.GuildMember(m.GuildID, m.Author.ID)
 	if err != nil || !hasAdminPermissions(s, member) {
 		return
@@ -104,7 +90,7 @@ func messageCommand(s *discordgo.Session, m *discordgo.MessageCreate) {
 
 	parts := strings.Fields(m.Content)
 	if len(parts) < 2 {
-		s.ChannelMessageSend(m.ChannelID, "Usage: !autodelete [enable|disable]")
+		s.ChannelMessageSend(m.ChannelID, "Usage: !autodelete [enable|disable] [minutes]")
 		return
 	}
 
@@ -118,12 +104,18 @@ func messageCommand(s *discordgo.Session, m *discordgo.MessageCreate) {
 	switch parts[1] {
 	case "enable":
 		settings.Enabled = true
-		s.ChannelMessageSend(m.ChannelID, "Auto-delete enabled for this channel")
+		if len(parts) >= 3 {
+			if minutes, err := strconv.Atoi(parts[2]); err == nil && minutes > 0 {
+				settings.DeleteAfterMinutes = minutes
+			}
+		}
+		msg := fmt.Sprintf("Auto-delete enabled for this channel (deleting after %d minutes)", settings.DeleteAfterMinutes)
+		s.ChannelMessageSend(m.ChannelID, msg)
 	case "disable":
 		settings.Enabled = false
 		s.ChannelMessageSend(m.ChannelID, "Auto-delete disabled for this channel")
 	default:
-		s.ChannelMessageSend(m.ChannelID, "Usage: !autodelete [enable|disable]")
+		s.ChannelMessageSend(m.ChannelID, "Usage: !autodelete [enable|disable] [minutes]")
 		return
 	}
 
@@ -131,7 +123,6 @@ func messageCommand(s *discordgo.Session, m *discordgo.MessageCreate) {
 }
 
 func hasAdminPermissions(s *discordgo.Session, member *discordgo.Member) bool {
-	// Check for administrator permission
 	for _, roleID := range member.Roles {
 		role, err := s.State.Role(member.GuildID, roleID)
 		if err != nil {
@@ -145,12 +136,10 @@ func hasAdminPermissions(s *discordgo.Session, member *discordgo.Member) bool {
 }
 
 func messageCreate(s *discordgo.Session, m *discordgo.MessageCreate) {
-	// Ignore bot's own messages and commands
 	if m.Author.ID == s.State.User.ID || strings.HasPrefix(m.Content, "!") {
 		return
 	}
 
-	// Check if auto-delete is enabled for this channel
 	var settings ChannelSettings
 	if err := db.Where("channel_id = ?", m.ChannelID).First(&settings).Error; err != nil {
 		log.Printf("Error getting channel settings: %v", err)
@@ -161,8 +150,8 @@ func messageCreate(s *discordgo.Session, m *discordgo.MessageCreate) {
 		return
 	}
 
-	// Schedule message deletion
 	go func() {
+		deleteAfter := time.Duration(settings.DeleteAfterMinutes) * time.Minute
 		time.Sleep(deleteAfter)
 		err := s.ChannelMessageDelete(m.ChannelID, m.ID)
 		if err != nil {
