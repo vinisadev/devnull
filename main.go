@@ -5,6 +5,7 @@ import (
 	"log"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -26,6 +27,13 @@ type Message struct {
 	DeleteTime time.Time
 }
 
+type ChannelSettings struct {
+	gorm.Model
+	ChannelID string `gorm:"uniqueIndex"`
+	ServerID  string
+	Enabled   bool
+}
+
 var db *gorm.DB
 
 func initDB() {
@@ -43,11 +51,13 @@ func initDB() {
 		log.Fatalf("Failed to connect to database: %v", err)
 	}
 
-	// Auto migrate the Message model
-	err = db.AutoMigrate(&Message{})
+	// Auto migrate models
+	err = db.AutoMigrate(&Message{}, &ChannelSettings{})
 	if err != nil {
 		log.Fatalf("Failed to migrate database: %v", err)
 	}
+
+	// Create default settings for existing channels (disabled by default)
 }
 
 func main() {
@@ -66,8 +76,9 @@ func main() {
 		log.Fatalf("Error creating Discord session: %v", err)
 	}
 
-	// Register message handler
+	// Register handlers
 	dg.AddHandler(messageCreate)
+	dg.AddHandler(messageCommand)
 
 	// Open connection
 	err = dg.Open()
@@ -83,9 +94,79 @@ func main() {
 	<-sc
 }
 
-func messageCreate(s *discordgo.Session, m *discordgo.MessageCreate) {
+func messageCommand(s *discordgo.Session, m *discordgo.MessageCreate) {
 	// Ignore bot's own messages
 	if m.Author.ID == s.State.User.ID {
+		return
+	}
+
+	// Check for !autodelete command
+	if !strings.HasPrefix(m.Content, "!autodelete") {
+		return
+	}
+
+	// Only allow server admins to use this command
+	member, err := s.GuildMember(m.GuildID, m.Author.ID)
+	if err != nil || !hasAdminPermissions(s, member) {
+		return
+	}
+
+	parts := strings.Fields(m.Content)
+	if len(parts) < 2 {
+		s.ChannelMessageSend(m.ChannelID, "Usage: !autodelete [enable|disable]")
+		return
+	}
+
+	var settings ChannelSettings
+	result := db.FirstOrCreate(&settings, ChannelSettings{ChannelID: m.ChannelID, ServerID: m.GuildID})
+	if result.Error != nil {
+		log.Printf("Error getting channel settings: %v", result.Error)
+		return
+	}
+
+	switch parts[1] {
+	case "enable":
+		settings.Enabled = true
+		s.ChannelMessageSend(m.ChannelID, "Auto-delete enabled for this channel")
+	case "disable":
+		settings.Enabled = false
+		s.ChannelMessageSend(m.ChannelID, "Auto-delete disabled for this channel")
+	default:
+		s.ChannelMessageSend(m.ChannelID, "Usage: !autodelete [enable|disable]")
+		return
+	}
+
+	db.Save(&settings)
+}
+
+func hasAdminPermissions(s *discordgo.Session, member *discordgo.Member) bool {
+	// Check for administrator permission
+	for _, roleID := range member.Roles {
+		role, err := s.State.Role(member.GuildID, roleID)
+		if err != nil {
+			continue
+		}
+		if role.Permissions&discordgo.PermissionAdministrator != 0 {
+			return true
+		}
+	}
+	return false
+}
+
+func messageCreate(s *discordgo.Session, m *discordgo.MessageCreate) {
+	// Ignore bot's own messages and commands
+	if m.Author.ID == s.State.User.ID || strings.HasPrefix(m.Content, "!") {
+		return
+	}
+
+	// Check if auto-delete is enabled for this channel
+	var settings ChannelSettings
+	if err := db.Where("channel_id = ?", m.ChannelID).First(&settings).Error; err != nil {
+		log.Printf("Error getting channel settings: %v", err)
+		return
+	}
+
+	if !settings.Enabled {
 		return
 	}
 
